@@ -11,13 +11,10 @@ Contoh:
     from channels.discord import DiscordChannel    # coming soon
 """
 
-from channels.base import AgentConfig, AgentRunner, BaseChannel, TaskResult
+from channels.base import BaseChannel
 from channels.telegram import TelegramChannel
 
 __all__ = [
 	'BaseChannel',
-	'AgentRunner',
-	'AgentConfig',
-	'TaskResult',
 	'TelegramChannel',
 ]
