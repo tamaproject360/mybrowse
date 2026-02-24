@@ -313,6 +313,7 @@ class TelegramChannel(BaseChannel):
             f'  /history — riwayat task\n'
             f'  /memory — memory tersimpan\n'
             f'  /forget — hapus memory\n'
+            f'  /clear — reset percakapan\n'
             f'  /help — bantuan lengkap'
         )
         await self._send(chat_id, text, reply_to=msg_id, keyboard=self._main_keyboard())
@@ -336,7 +337,8 @@ class TelegramChannel(BaseChannel):
             f'  /status — cek status\n'
             f'  /history — 5 task terakhir\n'
             f'  /memory — lihat memory\n'
-            f'  /forget — hapus semua memory'
+            f'  /forget — hapus semua memory\n'
+            f'  /clear — reset riwayat percakapan'
         )
         await self._send(chat_id, text, reply_to=msg_id, keyboard=self._main_keyboard())
 
@@ -417,6 +419,24 @@ class TelegramChannel(BaseChannel):
             await self._send(chat_id, f'🗑 {count} memory dihapus.', reply_to=msg_id, keyboard=self._main_keyboard())
         except Exception as e:
             await self._send(chat_id, f'❌ Gagal: <code>{e}</code>', reply_to=msg_id)
+
+    async def _cmd_clear(self, chat_id: int, msg_id: int) -> None:
+        """Hapus conversation history (context multi-turn) untuk chat ini."""
+        count = self.supervisor.clear_history('telegram', str(chat_id))
+        if count:
+            await self._send(
+                chat_id,
+                f'🧹 Riwayat percakapan dihapus ({count} pesan).\n\nKita mulai dari awal!',
+                reply_to=msg_id,
+                keyboard=self._main_keyboard(),
+            )
+        else:
+            await self._send(
+                chat_id,
+                'Tidak ada riwayat percakapan yang perlu dihapus.',
+                reply_to=msg_id,
+                keyboard=self._main_keyboard(),
+            )
 
     # ─── Main message handler ─────────────────────────────────────────
 
@@ -623,6 +643,8 @@ class TelegramChannel(BaseChannel):
             await self._cmd_memory(chat_id, msg_id)
         elif cmd == '/forget':
             await self._cmd_forget(chat_id, msg_id)
+        elif cmd == '/clear':
+            await self._cmd_clear(chat_id, msg_id)
         elif cmd in ('/task',):
             # Backward compat: strip /task prefix dan kirim sebagai pesan biasa
             task_text = text[len(cmd):].strip()
@@ -669,6 +691,7 @@ class TelegramChannel(BaseChannel):
                 {'command': 'history', 'description': 'Riwayat 5 task terakhir'},
                 {'command': 'memory', 'description': 'Tampilkan memory tersimpan'},
                 {'command': 'forget', 'description': 'Hapus semua memory'},
+                {'command': 'clear', 'description': 'Reset riwayat percakapan'},
                 {'command': 'help', 'description': 'Bantuan'},
             ],
         )

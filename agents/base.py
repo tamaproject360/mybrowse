@@ -43,6 +43,9 @@ class AgentContext:
     task_id: str | None = None         # DB task_id (diisi setelah task_create)
     on_update: Callable[[str], Awaitable[None]] | None = None
     # callback opsional untuk kirim update live (misal: "Browsing google.com...")
+    history: list[dict] = field(default_factory=list)
+    # percakapan sebelumnya dalam format OpenAI messages (tanpa system msg)
+    # diisi oleh Supervisor sebelum memanggil agent
     extra: dict[str, Any] = field(default_factory=dict)
 
 

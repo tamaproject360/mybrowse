@@ -72,10 +72,11 @@ class ChatAgent(BaseAgent):
         if ctx.memory_context:
             system += f'\n\n{ctx.memory_context}'
 
-        messages = [
-            {'role': 'system', 'content': system},
-            {'role': 'user', 'content': ctx.task},
-        ]
+        messages = [{'role': 'system', 'content': system}]
+        # Inject conversation history (multi-turn context)
+        if ctx.history:
+            messages.extend(ctx.history)
+        messages.append({'role': 'user', 'content': ctx.task})
 
         if ctx.on_update:
             try:

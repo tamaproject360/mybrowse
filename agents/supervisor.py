@@ -97,7 +97,12 @@ class Supervisor:
     Dapat diinstansiasi sekali dan digunakan oleh semua channel.
     Thread-safe: menggunakan asyncio.Lock() per eksekusi browser agar
     tidak ada dua browser berjalan bersamaan.
+
+    Conversation history disimpan in-memory per (channel, channel_id),
+    capped di MAX_HISTORY_MESSAGES pesan. Gunakan clear_history() untuk reset.
     """
+
+    MAX_HISTORY_MESSAGES = 20  # simpan max 20 pesan (10 turn) per sesi
 
     def __init__(self, llm: Any, config: BrowserConfig | None = None):
         self.llm = llm
@@ -108,6 +113,9 @@ class Supervisor:
             base_url=os.environ.get('OPENAI_BASE_URL', 'https://api.openai.com/v1'),
         )
         self._model = os.environ.get('OPENAI_MODEL', 'gpt-4o')
+
+        # Conversation history: {f"{channel}:{channel_id}": [msg, ...]}
+        self._histories: dict[str, list[dict]] = {}
 
         # Registry agen — mudah ditambah/dihapus
         self._agents: dict[str, BaseAgent] = {
@@ -120,6 +128,27 @@ class Supervisor:
         """Tambahkan agent baru ke registry. Plug & play."""
         self._agents[agent.name] = agent
         logger.info(f'Agent registered: {agent.name}')
+
+    def clear_history(self, channel: str, channel_id: str) -> int:
+        """Hapus conversation history untuk satu sesi. Return jumlah pesan yang dihapus."""
+        key = f'{channel}:{channel_id}'
+        hist = self._histories.pop(key, [])
+        logger.info(f'History cleared for {key}: {len(hist)} messages removed')
+        return len(hist)
+
+    def _get_history(self, channel: str, channel_id: str) -> list[dict]:
+        """Ambil history untuk satu sesi (buat jika belum ada)."""
+        return self._histories.setdefault(f'{channel}:{channel_id}', [])
+
+    def _append_history(self, channel: str, channel_id: str, user_msg: str, assistant_msg: str) -> None:
+        """Tambahkan turn ke history, buang yang paling lama jika melebihi cap."""
+        hist = self._get_history(channel, channel_id)
+        hist.append({'role': 'user', 'content': user_msg})
+        hist.append({'role': 'assistant', 'content': assistant_msg})
+        # Potong dari depan jika melebihi batas
+        if len(hist) > self.MAX_HISTORY_MESSAGES:
+            excess = len(hist) - self.MAX_HISTORY_MESSAGES
+            del hist[:excess]
 
     # ─── Routing ──────────────────────────────────────────────────────────
 
@@ -179,6 +208,10 @@ class Supervisor:
                 ) or None
             except Exception as e:
                 logger.debug(f'Gagal fetch memory: {e}')
+
+        # ── 1b. Inject conversation history ───────────────────────────
+        if not ctx.history:
+            ctx.history = list(self._get_history(ctx.channel, ctx.channel_id))
 
         # ── 2. Create DB task record ───────────────────────────────────
         task_id: str | None = None
@@ -291,6 +324,17 @@ class Supervisor:
                 )
             except Exception as e:
                 logger.debug(f'Auto-memory save gagal: {e}')
+
+        # ── 6. Update conversation history ─────────────────────────────
+        if result.output:
+            try:
+                self._append_history(
+                    ctx.channel, ctx.channel_id,
+                    user_msg=ctx.task,
+                    assistant_msg=result.output[:1000],  # cap per-message
+                )
+            except Exception as e:
+                logger.debug(f'History append gagal: {e}')
 
         return SupervisorResult(
             success=result.success,
