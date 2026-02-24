@@ -53,6 +53,7 @@ class TaskResult:
 	output: str
 	steps: int
 	errors: list[str]
+	attachments: list[str] = field(default_factory=list)  # path file screenshot/attachment
 
 	def format(self) -> str:
 		"""Format hasil untuk dikirim balik ke channel."""
@@ -144,11 +145,21 @@ class AgentRunner:
 				result = await agent.run(max_steps=self.config.max_steps)
 				output = result.final_result() or 'Task selesai tanpa output.'
 				errors = [e for e in result.errors() if e]
+
+				# Kumpulkan semua attachment (path file screenshot, dll) dari seluruh history
+				attachments: list[str] = []
+				for action_result in result.action_results():
+					if action_result and action_result.attachments:
+						for path in action_result.attachments:
+							if path and path not in attachments:
+								attachments.append(str(path))
+
 				return TaskResult(
 					success=result.is_successful() is not False,
 					output=output,
 					steps=result.number_of_steps(),
 					errors=errors,
+					attachments=attachments,
 				)
 			except Exception as e:
 				logger.exception(f'Agent error: {e}')

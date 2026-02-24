@@ -26,8 +26,10 @@ Cara pakai di Telegram:
 
 import asyncio
 import logging
+import os
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import aiohttp
@@ -193,6 +195,95 @@ class TelegramChannel(BaseChannel):
 	async def _typing(self, chat_id: int) -> None:
 		"""Kirim action 'typing'."""
 		await self._api('sendChatAction', chat_id=chat_id, action='typing')
+
+	async def _send_photo(
+		self,
+		chat_id: int,
+		photo_path: str,
+		caption: str = '',
+		keyboard: list[list[dict]] | None = None,
+	) -> int | None:
+		"""
+		Kirim file gambar ke Telegram menggunakan multipart/form-data.
+		Mendukung PNG, JPEG, WebP. Max 10MB untuk foto, 50MB untuk document.
+		"""
+		assert self._session is not None
+		path = Path(photo_path)
+		if not path.exists():
+			logger.warning(f'File screenshot tidak ditemukan: {photo_path}')
+			return None
+
+		file_size = path.stat().st_size
+		# Gunakan sendDocument untuk file besar (>10MB) agar kualitas tidak dikompres
+		use_document = file_size > 10 * 1024 * 1024
+
+		try:
+			form = aiohttp.FormData()
+			form.add_field('chat_id', str(chat_id))
+			if caption:
+				form.add_field('caption', caption[:1024])
+				form.add_field('parse_mode', 'HTML')
+			if keyboard:
+				import json
+				form.add_field('reply_markup', json.dumps({'inline_keyboard': keyboard}))
+
+			with open(photo_path, 'rb') as f:
+				field_name = 'document' if use_document else 'photo'
+				form.add_field(
+					field_name,
+					f,
+					filename=path.name,
+					content_type='image/png' if path.suffix.lower() == '.png' else 'image/jpeg',
+				)
+				method = 'sendDocument' if use_document else 'sendPhoto'
+				async with self._session.post(self._url(method), data=form) as resp:
+					data = await resp.json()
+					if data.get('ok'):
+						result = data.get('result', {})
+						return result.get('message_id')
+					else:
+						logger.error(f'Gagal kirim foto [{method}]: {data.get("description")}')
+						return None
+		except Exception as e:
+			logger.error(f'Error saat kirim foto: {e}')
+			return None
+
+	async def _send_photos_batch(
+		self,
+		chat_id: int,
+		photo_paths: list[str],
+		caption: str = '',
+	) -> None:
+		"""Kirim multiple screenshot satu per satu ke Telegram."""
+		valid_paths = [p for p in photo_paths if Path(p).exists()]
+		if not valid_paths:
+			return
+
+		for i, path in enumerate(valid_paths):
+			cap = caption if i == 0 else ''  # caption hanya di foto pertama
+			await self._send_photo(chat_id, path, caption=cap)
+			if len(valid_paths) > 1:
+				await asyncio.sleep(0.3)  # jeda kecil agar tidak flood
+
+	async def _send_document(self, chat_id: int, file_path: str, caption: str = '') -> None:
+		"""Kirim file arbitrary sebagai document Telegram."""
+		assert self._session is not None
+		path = Path(file_path)
+		if not path.exists():
+			return
+		try:
+			form = aiohttp.FormData()
+			form.add_field('chat_id', str(chat_id))
+			if caption:
+				form.add_field('caption', caption[:1024])
+			with open(file_path, 'rb') as f:
+				form.add_field('document', f, filename=path.name)
+				async with self._session.post(self._url('sendDocument'), data=form) as resp:
+					data = await resp.json()
+					if not data.get('ok'):
+						logger.error(f'Gagal kirim document: {data.get("description")}')
+		except Exception as e:
+			logger.error(f'Error saat kirim document: {e}')
 
 	# ─── Keyboard layouts ─────────────────────────────────────────────────
 
@@ -455,13 +546,33 @@ class TelegramChannel(BaseChannel):
 					done_text = self._build_progress_text(task, session, done=True)
 					await self._edit(chat_id, session.progress_msg_id, done_text, keyboard=[])
 
-				# Kirim hasil akhir sebagai pesan baru
+				# Kirim hasil akhir sebagai pesan teks
 				status_icon = '✅' if result.success else '❌'
 				result_text = (
 					f'{status_icon} <b>Hasil Task</b>\n\n'
 					f'{result.format()}'
 				)
 				await self._send(chat_id, result_text, keyboard=self._done_keyboard())
+
+				# Kirim screenshot / attachment jika ada
+				if result.attachments:
+					screenshot_paths = [
+						p for p in result.attachments
+						if p.lower().endswith(('.png', '.jpg', '.jpeg', '.webp'))
+					]
+					other_files = [
+						p for p in result.attachments
+						if p not in screenshot_paths
+					]
+
+					if screenshot_paths:
+						caption = f'📸 <b>Screenshot</b> ({len(screenshot_paths)} gambar)'
+						await self._send_photos_batch(chat_id, screenshot_paths, caption=caption)
+
+					# File non-gambar: kirim sebagai document
+					for file_path in other_files:
+						if Path(file_path).exists():
+							await self._send_document(chat_id, file_path)
 
 			except asyncio.CancelledError:
 				typing_stop.set()
