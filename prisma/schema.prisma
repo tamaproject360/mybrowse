@@ -1,0 +1,118 @@
+// Prisma schema for mybrowse
+// Database: PostgreSQL
+// ORM: Prisma (Python client)
+
+generator client {
+  provider             = "prisma-client-py"
+  interface            = "asyncio"
+  recursive_type_depth = 5
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Task ────────────────────────────────────────────────────────────────────
+// Setiap kali user mengirim perintah /task, satu record Task dibuat
+
+model Task {
+  id         String   @id @default(uuid())
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  // Identitas
+  channel    String   // "telegram", "discord", dll
+  channelId  String   @map("channel_id")  // chat_id / guild_id
+  username   String?  // username pengirim
+
+  // Task content
+  prompt     String   // perintah asli dari user
+  status     TaskStatus @default(PENDING)
+
+  // Hasil
+  output     String?  // final_result dari agent
+  success    Boolean?
+  steps      Int      @default(0)
+  durationMs Int?     @map("duration_ms")  // durasi dalam ms
+
+  // Relations
+  stepLogs    StepLog[]
+  attachments Attachment[]
+  memories    Memory[]
+
+  @@map("tasks")
+}
+
+enum TaskStatus {
+  PENDING
+  RUNNING
+  DONE
+  FAILED
+  CANCELLED
+}
+
+// ─── StepLog ─────────────────────────────────────────────────────────────────
+// Setiap langkah agent dicatat
+
+model StepLog {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now()) @map("created_at")
+
+  taskId    String   @map("task_id")
+  task      Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  stepNum   Int      @map("step_num")
+  actions   String[] // nama aksi yang dijalankan ["navigate", "click"]
+  nextGoal  String?  @map("next_goal")
+  evaluation String?
+  url       String?  // URL halaman saat step ini
+
+  @@map("step_logs")
+}
+
+// ─── Attachment ──────────────────────────────────────────────────────────────
+// File screenshot / download yang dihasilkan agent
+
+model Attachment {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now()) @map("created_at")
+
+  taskId    String   @map("task_id")
+  task      Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  fileName  String   @map("file_name")
+  filePath  String   @map("file_path")   // path absolut di disk
+  fileType  String   @map("file_type")   // "screenshot", "download", "pdf"
+  mimeType  String?  @map("mime_type")   // "image/png", dll
+  sizeBytes Int?     @map("size_bytes")
+
+  sentToChannel Boolean @default(false) @map("sent_to_channel")
+
+  @@map("attachments")
+}
+
+// ─── Memory ──────────────────────────────────────────────────────────────────
+// Long-term memory per channel/user untuk konteks lintas task
+
+model Memory {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  // Scope memory
+  channel   String
+  channelId String   @map("channel_id")
+  username  String?
+
+  // Content
+  content   String   // isi memory
+  memType   String   @default("general") @map("mem_type")  // "general", "preference", "fact"
+  source    String?  // task_id yang menghasilkan memory ini
+
+  // Relation opsional ke task
+  taskId    String?  @map("task_id")
+  task      Task?    @relation(fields: [taskId], references: [id], onDelete: SetNull)
+
+  @@map("memories")
+}

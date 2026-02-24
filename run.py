@@ -13,9 +13,11 @@ Environment (.env):
   CHROME_PATH             → Path ke Chrome (default: deteksi otomatis)
   AGENT_HEADLESS          → true/false (default: false)
   AGENT_MAX_STEPS         → Maksimum langkah agent (default: 50)
+  DATABASE_URL            → PostgreSQL URL (default: postgresql://postgres:password@localhost:5432/mybrowse)
 """
 
 import asyncio
+import logging
 import os
 import signal
 import sys
@@ -29,6 +31,7 @@ load_dotenv()
 
 from browser_use.llm import ChatOpenAI
 
+import db
 from channels.base import AgentConfig, AgentRunner
 
 # ─── Konfigurasi dari .env ───────────────────────────────────────────────────
@@ -54,12 +57,18 @@ AGENT_CONFIG = AgentConfig(
 
 async def run_cli(task: str) -> None:
 	"""Jalankan satu task langsung dari command line."""
-	runner = AgentRunner(llm=LLM, config=AGENT_CONFIG)
-	print(f'Task: {task}')
-	print('-' * 60)
-	result = await runner.run(task)
-	print('-' * 60)
-	print(result.format())
+	await db.get_pool()  # init DB pool
+	try:
+		runner = AgentRunner(llm=LLM, config=AGENT_CONFIG)
+		print(f'Task: {task}')
+		print('-' * 60)
+		result = await runner.run(task, channel='cli', channel_id='local')
+		print('-' * 60)
+		print(result.format())
+		if result.attachments:
+			print(f'\nAttachments: {result.attachments}')
+	finally:
+		await db.close_pool()
 
 
 # ─── Mode: Telegram Bot ───────────────────────────────────────────────────────
@@ -73,6 +82,13 @@ async def run_telegram() -> None:
 	if not token:
 		print('ERROR: TELEGRAM_BOT_TOKEN belum diset di .env')
 		sys.exit(1)
+
+	# Init DB pool sebelum mulai
+	try:
+		await db.get_pool()
+		logging.getLogger(__name__).info('Database pool siap.')
+	except Exception as e:
+		logging.getLogger(__name__).warning(f'Database tidak tersedia: {e}. Melanjutkan tanpa DB.')
 
 	# Parse allowed users dari env (kosong = semua diizinkan)
 	allowed_raw = os.getenv('TELEGRAM_ALLOWED_USERS', '').strip()
@@ -88,24 +104,35 @@ async def run_telegram() -> None:
 	# Graceful shutdown saat Ctrl+C
 	loop = asyncio.get_running_loop()
 
-	def _shutdown():
+	async def _shutdown() -> None:
 		print('\nMenghentikan bot...')
-		asyncio.create_task(bot.stop())
+		await bot.stop()
+		await db.close_pool()
+
+	def _signal_handler() -> None:
+		asyncio.create_task(_shutdown())
 
 	for sig in (signal.SIGINT, signal.SIGTERM):
 		try:
-			loop.add_signal_handler(sig, _shutdown)
+			loop.add_signal_handler(sig, _signal_handler)
 		except (NotImplementedError, OSError):
 			# Windows tidak support add_signal_handler sepenuhnya
 			pass
 
 	print('Telegram bot berjalan. Tekan Ctrl+C untuk berhenti.')
-	await bot.start()
+	try:
+		await bot.start()
+	finally:
+		await db.close_pool()
 
 
 # ─── Entry Point ──────────────────────────────────────────────────────────────
 
 if __name__ == '__main__':
+	logging.basicConfig(
+		level=logging.INFO,
+		format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+	)
 	args = sys.argv[1:]
 
 	if '--telegram' in args:

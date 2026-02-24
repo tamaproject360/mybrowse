@@ -8,6 +8,9 @@ Fitur:
 - Edit-in-place pesan progress (tidak spam baru)
 - Whitelist user_id untuk keamanan
 - Cancel task yang sedang berjalan
+- Long-term memory: inject konteks dari percakapan sebelumnya ke prompt agent
+- /history: tampilkan riwayat task terakhir
+- /memory: tampilkan / hapus memory
 
 Setup:
 1. Buat bot baru via @BotFather di Telegram -> dapatkan TELEGRAM_BOT_TOKEN
@@ -21,6 +24,9 @@ Cara pakai di Telegram:
   /task <cmd>    -> jalankan browser task
   /status        -> cek status bot & task aktif
   /cancel        -> batalkan task yang sedang berjalan
+  /history       -> riwayat task terakhir
+  /memory        -> tampilkan memory tersimpan
+  /forget        -> hapus semua memory
   /help          -> bantuan
 """
 
@@ -34,6 +40,7 @@ from typing import Any
 
 import aiohttp
 
+import db
 from channels.base import AgentRunner, BaseChannel, StepUpdate, TaskResult
 
 logger = logging.getLogger(__name__)
@@ -403,6 +410,10 @@ class TelegramChannel(BaseChannel):
 			f'<b>Contoh:</b>\n'
 			f'<code>/task buka google.com dan cari harga iPhone terbaru</code>\n'
 			f'<code>/task buka tokopedia.com dan cari laptop gaming termurah</code>\n\n'
+			f'<b>Perintah lain:</b>\n'
+			f'  /history — riwayat task terakhir\n'
+			f'  /memory  — tampilkan memory tersimpan\n'
+			f'  /forget  — hapus semua memory\n\n'
 			f'Gunakan tombol di bawah untuk navigasi cepat:'
 		)
 		await self._send(chat_id, text, reply_to=msg_id, keyboard=self._main_keyboard())
@@ -414,6 +425,9 @@ class TelegramChannel(BaseChannel):
 			f'  /task &lt;perintah&gt; — jalankan browser task\n'
 			f'  /cancel            — batalkan task yang berjalan\n'
 			f'  /status            — cek status bot\n'
+			f'  /history           — riwayat 5 task terakhir\n'
+			f'  /memory            — tampilkan memory tersimpan\n'
+			f'  /forget            — hapus semua memory\n'
 			f'  /help              — tampilkan bantuan ini\n\n'
 			f'<b>Contoh task:</b>\n'
 			f'<code>/task cari harga iPhone 16 di tokopedia</code>\n'
@@ -422,7 +436,8 @@ class TelegramChannel(BaseChannel):
 			f'<b>Tips:</b>\n'
 			f'• Semakin spesifik perintahmu, semakin akurat hasilnya\n'
 			f'• Satu task berjalan pada satu waktu\n'
-			f'• Gunakan /cancel untuk membatalkan'
+			f'• Gunakan /cancel untuk membatalkan\n'
+			f'• Bot mengingat konteks dari task sebelumnya (/memory)'
 		)
 		await self._send(chat_id, text, reply_to=msg_id, keyboard=self._main_keyboard())
 
@@ -464,6 +479,67 @@ class TelegramChannel(BaseChannel):
 				keyboard=self._main_keyboard(),
 			)
 
+	async def _cmd_history(self, chat_id: int, msg_id: int) -> None:
+		"""Tampilkan riwayat 5 task terakhir dari DB."""
+		try:
+			records = await db.task_list('telegram', str(chat_id), limit=5)
+		except Exception as e:
+			await self._send(chat_id, f'❌ Gagal membaca riwayat: <code>{e}</code>', reply_to=msg_id)
+			return
+
+		if not records:
+			await self._send(chat_id, 'Belum ada riwayat task.', reply_to=msg_id, keyboard=self._main_keyboard())
+			return
+
+		lines = ['<b>📋 Riwayat Task Terakhir</b>\n']
+		status_icons = {'DONE': '✅', 'FAILED': '❌', 'CANCELLED': '🚫', 'RUNNING': '🔄', 'PENDING': '⏳'}
+		for i, r in enumerate(records, 1):
+			icon = status_icons.get(r.status, '•')
+			prompt_short = r.prompt[:60] + '...' if len(r.prompt) > 60 else r.prompt
+			dur = f'{r.duration_ms // 1000}s' if r.duration_ms else '—'
+			lines.append(
+				f'{i}. {icon} <code>{prompt_short}</code>\n'
+				f'   Langkah: {r.steps} | Waktu: {dur} | Status: {r.status}'
+			)
+		await self._send(chat_id, '\n\n'.join(lines), reply_to=msg_id, keyboard=self._main_keyboard())
+
+	async def _cmd_memory(self, chat_id: int, msg_id: int) -> None:
+		"""Tampilkan memory tersimpan untuk chat ini."""
+		try:
+			memories = await db.memory_get_context('telegram', str(chat_id), limit=10)
+		except Exception as e:
+			await self._send(chat_id, f'❌ Gagal membaca memory: <code>{e}</code>', reply_to=msg_id)
+			return
+
+		if not memories:
+			await self._send(
+				chat_id,
+				'Belum ada memory tersimpan.\n\nMemory otomatis dibuat dari output task yang diselesaikan.',
+				reply_to=msg_id,
+				keyboard=self._main_keyboard(),
+			)
+			return
+
+		lines = ['<b>🧠 Memory Tersimpan</b>\n']
+		for m in reversed(memories):
+			ts = m.created_at.strftime('%d/%m %H:%M') if m.created_at else '—'
+			lines.append(f'[{m.mem_type}] <i>{ts}</i>\n{m.content[:120]}')
+		lines.append('\nGunakan /forget untuk menghapus semua memory.')
+		await self._send(chat_id, '\n\n'.join(lines), reply_to=msg_id, keyboard=self._main_keyboard())
+
+	async def _cmd_forget(self, chat_id: int, msg_id: int) -> None:
+		"""Hapus semua memory untuk chat ini."""
+		try:
+			count = await db.memory_delete('telegram', str(chat_id))
+			await self._send(
+				chat_id,
+				f'🗑 {count} memory telah dihapus.',
+				reply_to=msg_id,
+				keyboard=self._main_keyboard(),
+			)
+		except Exception as e:
+			await self._send(chat_id, f'❌ Gagal menghapus memory: <code>{e}</code>', reply_to=msg_id)
+
 	async def _cmd_task(self, chat_id: int, msg_id: int, task: str, username: str) -> None:
 		"""Terima dan jalankan task baru."""
 		if not task:
@@ -483,6 +559,13 @@ class TelegramChannel(BaseChannel):
 				keyboard=self._task_keyboard(),
 			)
 			return
+
+		# Ambil memory context dari DB (non-fatal)
+		memory_context: str | None = None
+		try:
+			memory_context = await db.memory_format_for_prompt('telegram', str(chat_id), limit=5) or None
+		except Exception as e:
+			self.logger.debug(f'Gagal ambil memory context: {e}')
 
 		# Reset session
 		session = self._get_session(chat_id)
@@ -537,7 +620,14 @@ class TelegramChannel(BaseChannel):
 			typing_task = asyncio.create_task(typing_loop())
 
 			try:
-				result: TaskResult = await self.on_task(task, on_step=on_step)
+				result: TaskResult = await self.on_task(
+					task,
+					on_step=on_step,
+					channel='telegram',
+					channel_id=str(chat_id),
+					username=username,
+					memory_context=memory_context,
+				)
 				typing_stop.set()
 				typing_task.cancel()
 
@@ -553,6 +643,21 @@ class TelegramChannel(BaseChannel):
 					f'{result.format()}'
 				)
 				await self._send(chat_id, result_text, keyboard=self._done_keyboard())
+
+				# Simpan output ke long-term memory (non-fatal) jika task sukses & ada output
+				if result.success and result.output and result.output != 'Task selesai tanpa output.':
+					try:
+						summary = result.output[:500]  # simpan maks 500 karakter
+						await db.memory_add(
+							channel='telegram',
+							channel_id=str(chat_id),
+							content=f'Task: {task[:100]}\nHasil: {summary}',
+							mem_type='task_result',
+							username=username,
+							source=task[:100],
+						)
+					except Exception as e:
+						self.logger.debug(f'Gagal simpan memory (non-fatal): {e}')
 
 				# Kirim screenshot / attachment jika ada
 				if result.attachments:
@@ -659,6 +764,15 @@ class TelegramChannel(BaseChannel):
 		elif cmd_raw == '/cancel':
 			await self._cmd_cancel(chat_id, msg_id)
 
+		elif cmd_raw == '/history':
+			await self._cmd_history(chat_id, msg_id)
+
+		elif cmd_raw == '/memory':
+			await self._cmd_memory(chat_id, msg_id)
+
+		elif cmd_raw == '/forget':
+			await self._cmd_forget(chat_id, msg_id)
+
 		elif cmd_raw == '/task':
 			task = text[len(cmd_raw):].strip()
 			# Hilangkan @botname jika ada di cmd_raw asli
@@ -699,6 +813,9 @@ class TelegramChannel(BaseChannel):
 				{'command': 'task', 'description': 'Jalankan browser task'},
 				{'command': 'status', 'description': 'Cek status bot'},
 				{'command': 'cancel', 'description': 'Batalkan task yang berjalan'},
+				{'command': 'history', 'description': 'Riwayat 5 task terakhir'},
+				{'command': 'memory', 'description': 'Tampilkan memory tersimpan'},
+				{'command': 'forget', 'description': 'Hapus semua memory'},
 				{'command': 'help', 'description': 'Bantuan penggunaan'},
 			],
 		)

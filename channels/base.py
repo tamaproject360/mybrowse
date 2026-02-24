@@ -13,13 +13,18 @@ Contoh channel yang sudah ada:
 
 import asyncio
 import logging
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
 from typing import Any, Callable, Awaitable
 
 from browser_use.agent.service import Agent
 from browser_use.browser import BrowserProfile, BrowserSession
 from browser_use.llm import BaseChatModel
+from browser_use import Tools
+from browser_use.agent.views import ActionResult
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +79,46 @@ class TaskResult:
 StepCallback = Callable[[StepUpdate], Awaitable[None]]
 
 
+def _build_screenshot_tools() -> Tools:
+	"""
+	Buat Tools dengan screenshot action yang SELALU menyimpan ke disk.
+
+	Masalah default: Agent memanggil screenshot tanpa file_name → hanya
+	set metadata untuk observasi berikutnya, tidak ada file yang disimpan.
+	Fix: Override screenshot action agar selalu simpan ke file bertimestamp.
+	"""
+	tools = Tools()
+
+	# Hapus screenshot default lalu tambah versi kita
+	# (exclude_actions tidak bisa dipakai karena Tools() sudah init;
+	#  kita daftarkan action baru dengan nama yang sama — yang terakhir menang)
+	@tools.action(
+		'Take a screenshot of the current page and save it to disk. '
+		'Always saves to a PNG file and returns the file path as an attachment.'
+	)
+	async def screenshot(browser_session: BrowserSession) -> ActionResult:
+		"""Take screenshot dan simpan ke disk dengan nama bertimestamp."""
+		import tempfile
+		ts = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+		file_name = f'screenshot_{ts}.png'
+		save_dir = Path(tempfile.gettempdir()) / 'mybrowse_screenshots'
+		save_dir.mkdir(parents=True, exist_ok=True)
+		file_path = save_dir / file_name
+
+		screenshot_bytes = await browser_session.take_screenshot(full_page=False)
+		file_path.write_bytes(screenshot_bytes)
+
+		result = f'Screenshot saved to {file_path}'
+		logger.info(f'Screenshot: {file_path}')
+		return ActionResult(
+			extracted_content=result,
+			long_term_memory=result,
+			attachments=[str(file_path)],
+		)
+
+	return tools
+
+
 class AgentRunner:
 	"""Runner terpusat untuk menjalankan browser agent dari channel manapun."""
 
@@ -86,6 +131,11 @@ class AgentRunner:
 		self,
 		task: str,
 		on_step: StepCallback | None = None,
+		# ── DB context (opsional, diisi oleh channel) ──
+		channel: str | None = None,
+		channel_id: str | None = None,
+		username: str | None = None,
+		memory_context: str | None = None,
 	) -> TaskResult:
 		"""
 		Jalankan task menggunakan browser agent.
@@ -94,34 +144,92 @@ class AgentRunner:
 		    task: Deskripsi task yang akan dijalankan
 		    on_step: Async callback dipanggil setiap kali agent menyelesaikan satu langkah.
 		             Menerima StepUpdate berisi info step terkini.
+		    channel: Nama channel (e.g. 'telegram')
+		    channel_id: ID chat/user di channel tersebut
+		    username: Username pengguna
+		    memory_context: String long-term memory yang di-inject ke prompt
 		"""
+		# Import db di sini agar opsional (tidak crash jika DB tidak tersedia)
+		use_db = bool(channel and channel_id)
+		db_mod = None
+		task_id: str | None = None
+
+		if use_db:
+			try:
+				import db as db_mod
+			except ImportError:
+				use_db = False
+				logger.warning('db module tidak ditemukan, melewati logging DB')
+
 		async with self._lock:
+			start_ts = time.time()
+
+			# Inject memory context ke task prompt jika ada
+			full_task = task
+			if memory_context:
+				full_task = f'{memory_context}\n\n---\nTask sekarang:\n{task}'
+
 			browser_profile = BrowserProfile(
 				headless=self.config.headless,
 				executable_path=self.config.executable_path,
 			)
 			browser_session = BrowserSession(browser_profile=browser_profile)
 
+			# Buat task DB record
+			if use_db and db_mod:
+				try:
+					task_id = await db_mod.task_create(
+						channel=channel,
+						channel_id=channel_id,
+						prompt=task,
+						username=username,
+					)
+				except Exception as e:
+					logger.warning(f'DB task_create gagal (non-fatal): {e}')
+					task_id = None
+
 			# Buat step callback wrapper yang dikenali Agent
 			async def _step_cb(browser_state: Any, agent_output: Any, step_num: int) -> None:
+				# Set task ke RUNNING pada step pertama
+				if step_num == 1 and use_db and db_mod and task_id:
+					try:
+						await db_mod.task_start(task_id)
+					except Exception as e:
+						logger.debug(f'DB task_start gagal: {e}')
+
+				# Ambil nama aksi dari AgentOutput
+				action_names: list[str] = []
+				for action in agent_output.action:
+					d = action.model_dump(exclude_none=True)
+					name = 'unknown'
+					for k in d:
+						if k != 'index':
+							name = k
+							break
+					action_names.append(name)
+
+				# Log step ke DB
+				if use_db and db_mod and task_id:
+					try:
+						url = ''
+						try:
+							url = browser_state.url or ''
+						except Exception:
+							pass
+						await db_mod.step_log(
+							task_id=task_id,
+							step_num=step_num,
+							actions=action_names,
+							next_goal=agent_output.next_goal or '',
+							evaluation=agent_output.evaluation_previous_goal or '',
+							url=url,
+						)
+					except Exception as e:
+						logger.debug(f'DB step_log gagal: {e}')
+
 				if on_step is None:
 					return
 				try:
-					# Ambil nama aksi dari AgentOutput
-					action_names: list[str] = []
-					for action in agent_output.action:
-						name = type(action).__name__.replace('ActionModel', '').lower()
-						# Coba ambil field pertama yang ada di model sebagai nama
-						d = action.model_dump(exclude_none=True)
-						for k, v in d.items():
-							if isinstance(v, dict) and 'url' not in k:
-								name = k
-								break
-							elif k != 'index':
-								name = k
-								break
-						action_names.append(name)
-
 					update = StepUpdate(
 						step=step_num,
 						max_steps=self.config.max_steps,
@@ -133,11 +241,14 @@ class AgentRunner:
 				except Exception as e:
 					logger.debug(f'Step callback error (non-fatal): {e}')
 
+			tools = _build_screenshot_tools()
+
 			agent = Agent(
-				task=task,
+				task=full_task,
 				llm=self.llm,
 				browser_session=browser_session,
-				register_new_step_callback=_step_cb if on_step else None,
+				tools=tools,
+				register_new_step_callback=_step_cb,
 				**self.config.extra_agent_kwargs,
 			)
 
@@ -154,15 +265,69 @@ class AgentRunner:
 							if path and path not in attachments:
 								attachments.append(str(path))
 
+				duration_ms = int((time.time() - start_ts) * 1000)
+				success = result.is_successful() is not False
+
+				# Selesaikan task di DB
+				if use_db and db_mod and task_id:
+					try:
+						await db_mod.task_done(
+							task_id=task_id,
+							output=output,
+							success=success,
+							steps=result.number_of_steps(),
+							duration_ms=duration_ms,
+						)
+						# Simpan attachment ke DB
+						for path in attachments:
+							try:
+								p = Path(path)
+								size = p.stat().st_size if p.exists() else None
+								ext = p.suffix.lower()
+								ftype = 'screenshot' if ext in ('.png', '.jpg', '.jpeg', '.webp') else 'file'
+								mime = 'image/png' if ext == '.png' else ('image/jpeg' if ext in ('.jpg', '.jpeg') else None)
+								await db_mod.attachment_save(
+									task_id=task_id,
+									file_name=p.name,
+									file_path=path,
+									file_type=ftype,
+									mime_type=mime,
+									size_bytes=size,
+								)
+							except Exception as e:
+								logger.debug(f'DB attachment_save gagal: {e}')
+					except Exception as e:
+						logger.warning(f'DB task_done gagal (non-fatal): {e}')
+
 				return TaskResult(
-					success=result.is_successful() is not False,
+					success=success,
 					output=output,
 					steps=result.number_of_steps(),
 					errors=errors,
 					attachments=attachments,
 				)
+			except asyncio.CancelledError:
+				# Task dibatalkan oleh user
+				if use_db and db_mod and task_id:
+					try:
+						await db_mod.task_cancel(task_id)
+					except Exception:
+						pass
+				raise
 			except Exception as e:
 				logger.exception(f'Agent error: {e}')
+				duration_ms = int((time.time() - start_ts) * 1000)
+				if use_db and db_mod and task_id:
+					try:
+						await db_mod.task_done(
+							task_id=task_id,
+							output='',
+							success=False,
+							steps=0,
+							duration_ms=duration_ms,
+						)
+					except Exception:
+						pass
 				return TaskResult(
 					success=False,
 					output='',
@@ -197,6 +362,10 @@ class BaseChannel(ABC):
 		self,
 		task: str,
 		on_step: StepCallback | None = None,
+		channel: str | None = None,
+		channel_id: str | None = None,
+		username: str | None = None,
+		memory_context: str | None = None,
 		**context: Any,
 	) -> TaskResult:
 		"""
@@ -204,4 +373,11 @@ class BaseChannel(ABC):
 		Override jika perlu pre/post processing, atau langsung pakai runner.
 		"""
 		self.logger.info(f'Task diterima: {task[:80]}...' if len(task) > 80 else f'Task diterima: {task}')
-		return await self.runner.run(task, on_step=on_step)
+		return await self.runner.run(
+			task,
+			on_step=on_step,
+			channel=channel,
+			channel_id=channel_id,
+			username=username,
+			memory_context=memory_context,
+		)
