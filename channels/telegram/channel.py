@@ -43,6 +43,7 @@ from typing import Any
 import aiohttp
 
 import db
+from agents.persona import get_persona
 from agents.supervisor import Supervisor, SupervisorResult
 from channels.base import BaseChannel
 
@@ -295,9 +296,15 @@ class TelegramChannel(BaseChannel):
     # ─── Command handlers ─────────────────────────────────────────────
 
     async def _cmd_start(self, chat_id: int, msg_id: int, username: str) -> None:
+        persona = get_persona()
+        ai_name = persona.ai_name
+        # Prioritas sapaan: nama owner dari identity.md > username Telegram
+        owner = persona.owner_callname or persona.owner_name or username
+
         text = (
-            f'Halo <b>{username}</b>!\n\n'
-            f'Saya <b>mybrowse</b> — AI agent yang bisa browsing internet, menjawab pertanyaan, '
+            f'Halo <b>{owner}</b>! 👋\n\n'
+            f'Saya <b>{ai_name}</b> — asisten AI personal kamu.\n'
+            f'Saya bisa browsing internet, menjawab pertanyaan, '
             f'dan mengingat percakapan kita.\n\n'
             f'<b>Cara pakai:</b>\n'
             f'Cukup kirim pesan biasa — saya akan otomatis pilih cara terbaik:\n'
@@ -319,8 +326,9 @@ class TelegramChannel(BaseChannel):
         await self._send(chat_id, text, reply_to=msg_id, keyboard=self._main_keyboard())
 
     async def _cmd_help(self, chat_id: int, msg_id: int) -> None:
+        ai_name = get_persona().ai_name
         text = (
-            f'<b>mybrowse — Panduan</b>\n\n'
+            f'<b>{ai_name} — Panduan</b>\n\n'
             f'<b>Cukup kirim pesan biasa</b>, tidak perlu prefix /task.\n'
             f'AI akan otomatis memilih:\n'
             f'  🌐 <b>Browser</b> — untuk browsing, cari info online, screenshot\n'

@@ -39,6 +39,7 @@ from agents.base import AgentContext, AgentResult, BaseAgent, BrowserConfig
 from agents.browser import BrowserAgent
 from agents.chat import ChatAgent
 from agents.memory import MemoryAgent
+from agents.persona import get_persona
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +73,7 @@ class SupervisorResult:
 
 # ─── Supervisor ───────────────────────────────────────────────────────────────
 
-ROUTER_SYSTEM = """You are a task router for a multi-agent AI system called mybrowse.
+ROUTER_SYSTEM = """You are the task router for {ai_name}, a multi-agent AI assistant.
 Your job is to select the BEST agent for the user's task.
 
 Available agents:
@@ -161,7 +162,11 @@ class Supervisor:
             f'- {name}: {agent.description}'
             for name, agent in self._agents.items()
         )
-        system = ROUTER_SYSTEM.format(agent_descriptions=descriptions)
+        ai_name = get_persona().ai_name
+        system = ROUTER_SYSTEM.format(
+            ai_name=ai_name,
+            agent_descriptions=descriptions,
+        )
 
         try:
             resp = await self._client.chat.completions.create(
@@ -240,7 +245,8 @@ class Supervisor:
             try:
                 icons = {'browser': '🌐', 'chat': '💬', 'memory': '🧠'}
                 icon = icons.get(agent_name, '⚡')
-                await ctx.on_update(f'{icon} Menggunakan {agent_name} agent...')
+                ai_name = get_persona().ai_name
+                await ctx.on_update(f'{icon} {ai_name} menggunakan {agent_name} agent...')
             except Exception:
                 pass
 

@@ -17,15 +17,9 @@ from browser_use import Agent
 from browser_use.browser import BrowserProfile, BrowserSession
 
 from agents.base import AgentContext, AgentResult, BaseAgent, BrowserConfig
+from agents.persona import get_persona
 
 logger = logging.getLogger(__name__)
-
-# Instruksi tambahan agar agent selalu simpan screenshot ke file
-_SCREENSHOT_INSTRUCTION = (
-    '\n\nIMPORTANT: Whenever you take a screenshot, ALWAYS provide a file_name '
-    'parameter (e.g. file_name="screenshot_step1") so the image is saved to disk '
-    'and can be sent back to the user. Never call screenshot without file_name.'
-)
 
 
 class BrowserAgent(BaseAgent):
@@ -58,6 +52,10 @@ class BrowserAgent(BaseAgent):
         if ctx.memory_context:
             full_task = f'{ctx.memory_context}\n\n---\nTask sekarang:\n{ctx.task}'
 
+        # Bangun extend_system_message dari persona (karakter + instruksi screenshot)
+        persona = get_persona()
+        extend_msg = persona.build_browser_instruction()
+
         browser_profile = BrowserProfile(
             headless=self.config.headless,
             executable_path=self.config.executable_path,
@@ -88,7 +86,7 @@ class BrowserAgent(BaseAgent):
             task=full_task,
             llm=self.llm,
             browser_session=browser_session,
-            extend_system_message=_SCREENSHOT_INSTRUCTION,
+            extend_system_message=extend_msg,
             register_new_step_callback=_step_cb,
         )
 

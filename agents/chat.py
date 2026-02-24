@@ -3,33 +3,22 @@ agents/chat.py — ChatAgent
 
 Agent untuk reasoning, Q&A, ringkasan, kalkulasi, penjelasan, dan tugas
 yang tidak memerlukan browser. Langsung panggil LLM tanpa browser.
+
+Persona (nama AI, karakter) dan identitas pemilik diinjeksikan dari
+soul.md dan identity.md melalui PersonaLoader.
 """
 
 from __future__ import annotations
 
 import logging
 import os
-import time
 
 from openai import AsyncOpenAI
 
 from agents.base import AgentContext, AgentResult, BaseAgent
+from agents.persona import get_persona
 
 logger = logging.getLogger(__name__)
-
-SYSTEM_PROMPT = """Kamu adalah asisten AI cerdas bernama mybrowse yang membantu pengguna.
-Kamu bisa:
-- Menjawab pertanyaan umum
-- Meringkas teks
-- Menjelaskan konsep
-- Kalkulasi dan analisis
-- Menulis teks, kode, atau konten
-- Memberikan rekomendasi
-
-Jawab dengan bahasa yang sama dengan pertanyaan user (Indonesia atau Inggris).
-Jawaban ringkas dan padat, tapi lengkap dan akurat.
-Jika ada konteks memory dari percakapan sebelumnya, gunakan untuk jawaban yang lebih personal.
-"""
 
 
 class ChatAgent(BaseAgent):
@@ -54,9 +43,8 @@ class ChatAgent(BaseAgent):
         'use browser agent for that.'
     )
 
-    def __init__(self, llm: object):
+    def __init__(self, llm: object) -> None:
         super().__init__(llm)
-        # Buat AsyncOpenAI client dari env yang sama dengan LLM utama
         self._client = AsyncOpenAI(
             api_key=os.environ.get('OPENAI_API_KEY', ''),
             base_url=os.environ.get('OPENAI_BASE_URL', 'https://api.openai.com/v1'),
@@ -65,22 +53,23 @@ class ChatAgent(BaseAgent):
 
     async def run(self, ctx: AgentContext) -> AgentResult:
         """Jawab task menggunakan LLM langsung (tanpa browser)."""
-        start = time.time()
 
-        # Build system message dengan memory context jika ada
-        system = SYSTEM_PROMPT
-        if ctx.memory_context:
-            system += f'\n\n{ctx.memory_context}'
+        # ── Susun system prompt dari persona + memory context ─────────────
+        persona = get_persona()
+        system = persona.build_system_prompt(
+            extra=ctx.memory_context or ''
+        )
 
-        messages = [{'role': 'system', 'content': system}]
-        # Inject conversation history (multi-turn context)
+        # ── Build messages: system + history + user ───────────────────────
+        messages: list[dict] = [{'role': 'system', 'content': system}]
         if ctx.history:
             messages.extend(ctx.history)
         messages.append({'role': 'user', 'content': ctx.task})
 
         if ctx.on_update:
             try:
-                await ctx.on_update('[chat] Memproses pertanyaan...')
+                ai_name = persona.ai_name
+                await ctx.on_update(f'[chat] {ai_name} memproses...')
             except Exception:
                 pass
 
